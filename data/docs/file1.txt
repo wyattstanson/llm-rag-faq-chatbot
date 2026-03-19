@@ -1,0 +1,2 @@
+Artificial Intelligence is the simulation of human intelligence by machines.
+Machine learning is a subset of AI.
