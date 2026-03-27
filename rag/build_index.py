@@ -1,24 +1,36 @@
-import os
-from rag.embedder import get_embedding
-from rag.vector_store import create_index, save_index
 
-DOC_PATH = "data/docs"
 
-documents = []
+import sys
+from pathlib import Path
 
-for file in os.listdir(DOC_PATH):
-    file_path = os.path.join(DOC_PATH, file)
-    if os.path.isfile(file_path):
-        with open(file_path, "r", encoding="utf-8") as f:
-            documents.append(f.read())
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-if len(documents) == 0:
-    print("No documents found in data/docs/")
-    exit()
+from config.settings import settings
+from rag.embedder import Embedder
+from rag.vector_store import VectorStore
+from rag.ingestion import ingest_documents
 
-embeddings = [get_embedding(doc) for doc in documents]
 
-index = create_index(embeddings)
-save_index(index, documents)
+def build():
+    docs_dir = settings.DATA_DIR
+    paths = list(docs_dir.glob("**/*.txt")) + list(docs_dir.glob("**/*.pdf"))
 
-print("Index built successfully")
+    if not paths:
+        print(f"No documents found in {docs_dir}")
+        return
+
+    print(f"Found {len(paths)} documents. Building index…")
+    embedder = Embedder(settings.EMBED_MODEL)
+    vs = VectorStore(settings.VECTOR_STORE_PATH)
+
+    n = ingest_documents(
+        [str(p) for p in paths],
+        embedder, vs,
+        chunk_size=settings.CHUNK_SIZE,
+        chunk_overlap=settings.CHUNK_OVERLAP,
+    )
+    print(f"Done! {n} chunks indexed → {settings.VECTOR_STORE_PATH}")
+
+
+if __name__ == "__main__":
+    build()
