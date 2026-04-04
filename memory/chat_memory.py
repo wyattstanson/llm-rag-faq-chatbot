@@ -1,120 +1,163 @@
-
-
 import sqlite3
 import json
 import uuid
+import os
 from datetime import datetime
-from pathlib import Path
-from typing import List, Optional
+from config.settings import SQLITE_DB_PATH
+
+os.makedirs(os.path.dirname(SQLITE_DB_PATH), exist_ok=True)
 
 
-class ChatMemory:
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
+def get_conn():
+    conn = sqlite3.connect(SQLITE_DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-    def _conn(self):
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
 
-    def _init_db(self):
-        with self._conn() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS conversations (
-                    id TEXT PRIMARY KEY,
-                    title TEXT,
-                    created_at TEXT,
-                    updated_at TEXT
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    conversation_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    metadata TEXT,
-                    created_at TEXT,
-                    FOREIGN KEY (conversation_id) REFERENCES conversations(id)
-                )
-            """)
-            conn.commit()
+def init_db():
+    conn = get_conn()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS conversations (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            mode TEXT DEFAULT 'general',
+            pinned INTEGER DEFAULT 0,
+            created_at TEXT,
+            updated_at TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT,
+            role TEXT,
+            content TEXT,
+            sources TEXT,
+            created_at TEXT,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+        )
+    """)
+    conn.commit()
 
-   
-    def new_conversation(self, title: str = "New conversation") -> str:
-        cid = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
-        with self._conn() as conn:
-            conn.execute(
-                "INSERT INTO conversations (id, title, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?)",
-                (cid, title, now, now)
-            )
-            conn.commit()
-        return cid
+    conv_cols = [r[1] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()]
+    msg_cols  = [r[1] for r in conn.execute("PRAGMA table_info(messages)").fetchall()]
 
-    def update_title(self, conv_id: str, title: str):
-        with self._conn() as conn:
-            conn.execute(
-                "UPDATE conversations SET title=?, updated_at=? WHERE id=?",
-                (title, datetime.utcnow().isoformat(), conv_id)
-            )
-            conn.commit()
+    if "mode" not in conv_cols:
+        conn.execute("ALTER TABLE conversations ADD COLUMN mode TEXT DEFAULT 'general'")
+        conn.execute("UPDATE conversations SET mode = 'general' WHERE mode IS NULL")
+    if "pinned" not in conv_cols:
+        conn.execute("ALTER TABLE conversations ADD COLUMN pinned INTEGER DEFAULT 0")
+        conn.execute("UPDATE conversations SET pinned = 0 WHERE pinned IS NULL")
+    if "sources" not in msg_cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN sources TEXT DEFAULT '[]'")
+        conn.execute("UPDATE messages SET sources = '[]' WHERE sources IS NULL")
 
-    def list_conversations(self) -> List[dict]:
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM conversations ORDER BY updated_at DESC LIMIT 50"
-            ).fetchall()
-        return [dict(r) for r in rows]
+    conn.commit()
+    conn.close()
 
-    def delete_conversation(self, conv_id: str):
-        with self._conn() as conn:
-            conn.execute("DELETE FROM messages WHERE conversation_id=?", (conv_id,))
-            conn.execute("DELETE FROM conversations WHERE id=?", (conv_id,))
-            conn.commit()
 
-    
+def _safe(d, key, default):
+    v = d.get(key)
+    return v if v is not None else default
 
-    def save_message(
-        self,
-        conv_id: str,
-        role: str,
-        content: str,
-        metadata: Optional[dict] = None
-    ):
-        now = datetime.utcnow().isoformat()
-        with self._conn() as conn:
-            conn.execute(
-                "INSERT INTO messages (conversation_id, role, content, metadata, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (conv_id, role, content, json.dumps(metadata or {}), now)
-            )
-            conn.execute(
-                "UPDATE conversations SET updated_at=? WHERE id=?",
-                (now, conv_id)
-            )
-            conn.commit()
 
-    def load_messages(self, conv_id: str) -> List[dict]:
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT role, content, metadata FROM messages "
-                "WHERE conversation_id=? ORDER BY id ASC",
-                (conv_id,)
-            ).fetchall()
-        result = []
-        for row in rows:
-            meta = json.loads(row["metadata"] or "{}")
-            result.append({
-                "role": row["role"],
-                "content": row["content"],
-                "sources": meta.get("sources", []),
-            })
-        return result
+def _conv(row):
+    d = dict(row)
+    d["mode"]   = _safe(d, "mode",   "general")
+    d["pinned"] = int(_safe(d, "pinned", 0))
+    return d
 
-    def get_recent_messages(self, conv_id: str, n: int = 10) -> List[dict]:
-        msgs = self.load_messages(conv_id)
-        return msgs[-n * 2:]  
+
+def create_conversation(title="New Chat", mode="general"):
+    conn = get_conn()
+    cid  = str(uuid.uuid4())
+    now  = datetime.utcnow().isoformat()
+    conn.execute(
+        "INSERT INTO conversations (id, title, mode, pinned, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?)",
+        (cid, title, mode, now, now)
+    )
+    conn.commit()
+    conn.close()
+    return cid
+
+
+def get_conversations():
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM conversations ORDER BY pinned DESC, updated_at DESC"
+    ).fetchall()
+    conn.close()
+    return [_conv(r) for r in rows]
+
+
+def get_conversation(cid):
+    conn = get_conn()
+    row  = conn.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
+    conn.close()
+    return _conv(row) if row else None
+
+
+def update_conversation_title(cid, title):
+    conn = get_conn()
+    conn.execute(
+        "UPDATE conversations SET title=?, updated_at=? WHERE id=?",
+        (title, datetime.utcnow().isoformat(), cid)
+    )
+    conn.commit()
+    conn.close()
+
+
+def toggle_pin(cid):
+    conn  = get_conn()
+    row   = conn.execute("SELECT pinned FROM conversations WHERE id=?", (cid,)).fetchone()
+    if row:
+        new_val = 0 if int(row["pinned"] or 0) else 1
+        conn.execute("UPDATE conversations SET pinned=? WHERE id=?", (new_val, cid))
+        conn.commit()
+    conn.close()
+
+
+def delete_conversation(cid):
+    conn = get_conn()
+    conn.execute("DELETE FROM messages WHERE conversation_id=?", (cid,))
+    conn.execute("DELETE FROM conversations WHERE id=?", (cid,))
+    conn.commit()
+    conn.close()
+
+
+def add_message(conversation_id, role, content, sources=None):
+    conn = get_conn()
+    mid  = str(uuid.uuid4())
+    now  = datetime.utcnow().isoformat()
+    conn.execute(
+        "INSERT INTO messages (id, conversation_id, role, content, sources, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (mid, conversation_id, role, content, json.dumps(sources or []), now)
+    )
+    conn.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, conversation_id))
+    conn.commit()
+    conn.close()
+    return mid
+
+
+def get_messages(conversation_id, limit=None):
+    conn  = get_conn()
+    query = "SELECT * FROM messages WHERE conversation_id=? ORDER BY created_at ASC"
+    if limit:
+        query += f" LIMIT {limit}"
+    rows = conn.execute(query, (conversation_id,)).fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["sources"] = json.loads(d.get("sources") or "[]")
+        result.append(d)
+    return result
+
+
+def get_recent_messages_for_llm(conversation_id, max_messages=20):
+    msgs   = get_messages(conversation_id)
+    recent = msgs[-max_messages:] if len(msgs) > max_messages else msgs
+    return [{"role": m["role"], "content": m["content"]} for m in recent]
+
+
+init_db()

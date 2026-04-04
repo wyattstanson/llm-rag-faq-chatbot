@@ -1,128 +1,97 @@
-
-
 import re
-from pathlib import Path
-from typing import List
+import os
+from config.settings import CHUNK_SIZE, CHUNK_OVERLAP, UPLOADS_PATH, DOCS_PATH
+
+os.makedirs(UPLOADS_PATH, exist_ok=True)
+os.makedirs(DOCS_PATH, exist_ok=True)
 
 
-def load_document(path: str) -> str:
-    """Load raw text from a file."""
-    p = Path(path)
-    suffix = p.suffix.lower()
-
-    if suffix == ".txt" or suffix == ".md":
-        return p.read_text(encoding="utf-8", errors="ignore")
-
-    elif suffix == ".pdf":
-        try:
-            import pdfplumber
-            text_parts = []
-            with pdfplumber.open(path) as pdf:
-                for page in pdf.pages:
-                    t = page.extract_text()
-                    if t:
-                        text_parts.append(t)
-            return "\n\n".join(text_parts)
-        except ImportError:
-            # Fallback to PyPDF2
-            try:
-                import PyPDF2
-                text_parts = []
-                with open(path, "rb") as f:
-                    reader = PyPDF2.PdfReader(f)
-                    for page in reader.pages:
-                        t = page.extract_text()
-                        if t:
-                            text_parts.append(t)
-                return "\n\n".join(text_parts)
-            except ImportError:
-                raise ImportError("Install pdfplumber: pip install pdfplumber")
-    else:
-     
-        try:
-            return p.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            raise ValueError(f"Unsupported file type: {suffix}")
-
-
-def chunk_text(
-    text: str,
-    chunk_size: int = 400,
-    chunk_overlap: int = 80,
-    source: str = ""
-) -> List[dict]:
-    """
-    Split text into overlapping chunks.
-    Returns list of dicts with 'text' and 'source' keys.
-    """
-    
-    text = re.sub(r"\n{3,}", "\n\n", text.strip())
-
-    
+def chunk_text(text, source="unknown", chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
+    text = re.sub(r'\s+', ' ', text).strip()
     words = text.split()
     chunks = []
     start = 0
-
     while start < len(words):
         end = min(start + chunk_size, len(words))
-        chunk_words = words[start:end]
-        chunk_text = " ".join(chunk_words)
-
-        if len(chunk_text.strip()) > 30:  
-            chunks.append({
-                "text": chunk_text,
-                "source": Path(source).name if source else "unknown",
-                "chunk_index": len(chunks),
-            })
-
-        if end >= len(words):
-            break
-        start = end - chunk_overlap  
-
+        chunk = " ".join(words[start:end])
+        chunks.append({
+            "text": chunk,
+            "source": source,
+            "chunk_index": len(chunks)
+        })
+        start += chunk_size - overlap
     return chunks
 
 
-def ingest_documents(
-    paths: List[str],
-    embedder,
-    vector_store,
-    chunk_size: int = 400,
-    chunk_overlap: int = 80,
-):
-    """
-    Full ingestion pipeline:
-    1. Load documents
-    2. Chunk text
-    3. Embed chunks
-    4. Add to vector store
-    5. Save vector store
-    """
-    all_chunks = []
+def extract_text(file_bytes=None, file_path=None, filename="unknown"):
+    ext = filename.lower().split(".")[-1]
+    if ext == "pdf":
+        return _extract_pdf(file_bytes=file_bytes, file_path=file_path)
+    elif ext in ("txt", "md"):
+        if file_bytes:
+            return file_bytes.decode("utf-8", errors="ignore")
+        with open(file_path, "r", errors="ignore") as f:
+            return f.read()
+    return ""
 
-    for path in paths:
+
+def _extract_pdf(file_bytes=None, file_path=None):
+    try:
+        import pdfplumber
+        import io
+        src = io.BytesIO(file_bytes) if file_bytes else file_path
+        with pdfplumber.open(src) as pdf:
+            return "\n".join(p.extract_text() or "" for p in pdf.pages)
+    except Exception:
         try:
-            text = load_document(path)
-            chunks = chunk_text(text, chunk_size, chunk_overlap, source=path)
-            all_chunks.extend(chunks)
-            print(f"  ✓ {Path(path).name} → {len(chunks)} chunks")
+            import PyPDF2
+            import io
+            src = io.BytesIO(file_bytes) if file_bytes else open(file_path, "rb")
+            reader = PyPDF2.PdfReader(src)
+            return "\n".join(page.extract_text() or "" for page in reader.pages)
         except Exception as e:
-            print(f"  ✗ {Path(path).name}: {e}")
+            return f"[PDF extraction failed: {e}]"
 
-    if not all_chunks:
-        raise ValueError("No content could be extracted from uploaded files.")
 
-  
-    texts = [c["text"] for c in all_chunks]
-    embeddings = embedder.embed_batch(texts)
+def ingest_bytes(file_bytes, filename):
+    from rag.embedder import embed_texts
+    from rag.vector_store import add_vectors
 
-  
-    vector_store.add(
-        embeddings=embeddings,
-        texts=texts,
-        metadata=[{"source": c["source"], "chunk_index": c["chunk_index"]}
-                  for c in all_chunks],
-    )
-    vector_store.save()
+    save_path = os.path.join(UPLOADS_PATH, filename)
+    with open(save_path, "wb") as f:
+        f.write(file_bytes)
 
-    print(f"  ✓ Total: {len(all_chunks)} chunks indexed")
-    return len(all_chunks)
+    text = extract_text(file_bytes=file_bytes, filename=filename)
+    if not text or len(text.strip()) < 50:
+        return 0
+
+    chunks = chunk_text(text, source=filename)
+    if not chunks:
+        return 0
+
+    vectors = embed_texts([c["text"] for c in chunks])
+    add_vectors(vectors, chunks)
+    return len(chunks)
+
+
+def ingest_directory(path=DOCS_PATH):
+    from rag.embedder import embed_texts
+    from rag.vector_store import add_vectors
+
+    total = 0
+    if not os.path.exists(path):
+        return total
+
+    for fname in os.listdir(path):
+        fpath = os.path.join(path, fname)
+        if not os.path.isfile(fpath):
+            continue
+        text = extract_text(file_path=fpath, filename=fname)
+        if not text:
+            continue
+        chunks = chunk_text(text, source=fname)
+        if chunks:
+            vectors = embed_texts([c["text"] for c in chunks])
+            add_vectors(vectors, chunks)
+            total += len(chunks)
+    return total

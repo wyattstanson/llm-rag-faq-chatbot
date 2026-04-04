@@ -1,19 +1,23 @@
+from rag.embedder import embed_query
+from rag.vector_store import search
+from config.settings import TOP_K
 
 
-from typing import List
+def retrieve(query, top_k=TOP_K):
+    qv = embed_query(query)
+    return search(qv, top_k=top_k)
 
 
-class Retriever:
-    def __init__(self, vector_store, embedder):
-        self.vs = vector_store
-        self.embedder = embedder
+def format_context(results):
+    if not results:
+        return None, []
 
-    def retrieve(self, query: str, top_k: int = 4) -> List[dict]:
-        """Embed query and return top-k relevant chunks."""
-        if not query.strip():
-            return []
+    parts = []
+    sources = []
+    for i, r in enumerate(results):
+        parts.append(f"[Source {i+1}: {r.get('source', 'doc')}]\n{r['text']}")
+        src = r.get("source", "unknown")
+        if src not in sources:
+            sources.append(src)
 
-        q_emb = self.embedder.embed(query)
-        results = self.vs.search(q_emb, top_k=top_k)
-
-        return [r for r in results if r["score"] > 0.2]
+    return "\n\n".join(parts), sources

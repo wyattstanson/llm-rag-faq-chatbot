@@ -1,85 +1,95 @@
-
-import os
-import json
+import faiss
 import pickle
-from pathlib import Path
-from typing import List, Optional
 import numpy as np
+import os
+from config.settings import VECTOR_INDEX_PATH, FAISS_INDEX_FILE, META_FILE
+
+os.makedirs(VECTOR_INDEX_PATH, exist_ok=True)
+
+_index = None
+_metadata = []
 
 
-class VectorStore:
-    def __init__(self, store_path: str):
-        self.store_path = Path(store_path)
-        self.index_file = self.store_path / "index.faiss"
-        self.meta_file = self.store_path / "metadata.pkl"
-        self._index = None
-        self._texts: List[str] = []
-        self._metadata: List[dict] = []
+def _normalise(m):
+    if isinstance(m, dict):
+        return m
+    if isinstance(m, str):
+        return {"text": m, "source": m, "chunk_index": 0}
+    return {"text": str(m), "source": "unknown", "chunk_index": 0}
 
-        if self.exists():
-            self.load()
 
-    def exists(self) -> bool:
-        return self.index_file.exists() and self.meta_file.exists()
+def _load_index(dim=384):
+    global _index
+    if _index is None:
+        if os.path.exists(FAISS_INDEX_FILE):
+            _index = faiss.read_index(FAISS_INDEX_FILE)
+        else:
+            _index = faiss.IndexFlatIP(dim)
+    return _index
 
-    def _get_faiss(self):
-        try:
-            import faiss
-            return faiss
-        except ImportError:
-            raise ImportError("Run: pip install faiss-cpu")
 
-    def add(
-        self,
-        embeddings: np.ndarray,
-        texts: List[str],
-        metadata: Optional[List[dict]] = None,
-    ):
-        faiss = self._get_faiss()
-        embeddings = embeddings.astype(np.float32)
-        dim = embeddings.shape[1]
+def _load_metadata():
+    global _metadata
+    if not _metadata and os.path.exists(META_FILE):
+        with open(META_FILE, "rb") as f:
+            raw = pickle.load(f)
+        _metadata = [_normalise(m) for m in raw]
+    return _metadata
 
-        if self._index is None:
-            self._index = faiss.IndexFlatIP(dim)  
 
-        self._index.add(embeddings)
-        self._texts.extend(texts)
-        self._metadata.extend(metadata or [{} for _ in texts])
+def _save():
+    faiss.write_index(_index, FAISS_INDEX_FILE)
+    with open(META_FILE, "wb") as f:
+        pickle.dump(_metadata, f)
 
-    def search(self, query_embedding: np.ndarray, top_k: int = 4) -> List[dict]:
-        if self._index is None or self._index.ntotal == 0:
-            return []
 
-        q = query_embedding.astype(np.float32).reshape(1, -1)
-        k = min(top_k, self._index.ntotal)
-        scores, indices = self._index.search(q, k)
+def add_vectors(vectors, metadata_list):
+    global _index, _metadata
+    arr = np.array(vectors, dtype="float32")
+    faiss.normalize_L2(arr)
+    _load_metadata()
+    idx = _load_index(arr.shape[1])
+    idx.add(arr)
+    _metadata.extend([_normalise(m) for m in metadata_list])
+    _save()
 
-        results = []
-        for score, idx in zip(scores[0], indices[0]):
-            if idx >= 0 and idx < len(self._texts):
-                results.append({
-                    "text": self._texts[idx],
-                    "score": float(score),
-                    "source": self._metadata[idx].get("source", ""),
-                    "metadata": self._metadata[idx],
-                })
-        return results
 
-    def save(self):
-        faiss = self._get_faiss()
-        self.store_path.mkdir(parents=True, exist_ok=True)
-        faiss.write_index(self._index, str(self.index_file))
-        with open(self.meta_file, "wb") as f:
-            pickle.dump({"texts": self._texts, "metadata": self._metadata}, f)
+def search(query_vector, top_k=4):
+    _load_metadata()
+    if not _metadata:
+        return []
+    idx = _load_index()
+    arr = np.array([query_vector], dtype="float32")
+    faiss.normalize_L2(arr)
+    scores, indices = idx.search(arr, min(top_k, len(_metadata)))
+    results = []
+    for score, i in zip(scores[0], indices[0]):
+        if 0 <= i < len(_metadata):
+            results.append({**_metadata[i], "score": float(score)})
+    return results
 
-    def load(self):
-        faiss = self._get_faiss()
-        self._index = faiss.read_index(str(self.index_file))
-        with open(self.meta_file, "rb") as f:
-            data = pickle.load(f)
-        self._texts = data.get("texts", [])
-        self._metadata = data.get("metadata", [])
 
-    @property
-    def size(self) -> int:
-        return self._index.ntotal if self._index else 0
+def get_doc_count():
+    _load_metadata()
+    return len(_metadata)
+
+
+def list_sources():
+    _load_metadata()
+    seen = set()
+    sources = []
+    for m in _metadata:
+        src = m.get("source", "unknown")
+        if src not in seen:
+            seen.add(src)
+            sources.append(src)
+    return sources
+
+
+def clear_index():
+    global _index, _metadata
+    _index = None
+    _metadata = []
+    for f in [FAISS_INDEX_FILE, META_FILE]:
+        if os.path.exists(f):
+            os.remove(f)

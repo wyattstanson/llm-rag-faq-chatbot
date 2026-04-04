@@ -1,888 +1,938 @@
-
-
 import streamlit as st
-import time
-import json
 import os
-from datetime import datetime
-from pathlib import Path
-import uuid
+import sys
 
+sys.path.insert(0, os.path.dirname(__file__))
 
-from config.settings import settings
-from llm.client import LLMClient
-from llm.prompt_builder import PromptBuilder
-from rag.retriever import Retriever
-from rag.embedder import Embedder
-from rag.vector_store import VectorStore
-from rag.ingestion import ingest_documents
-from memory.chat_memory import ChatMemory
-from rai.intent_classifier import IntentClassifier
-from rai.policy_engine import PolicyEngine
-from rai.evaluator import ResponseEvaluator
-
-
-st.set_page_config(
-    page_title="FinanceAI",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded",
+from config.settings import FINANCE_SYSTEM_PROMPT, GENERAL_SYSTEM_PROMPT
+from memory.chat_memory import (
+    create_conversation, get_conversations, get_conversation,
+    add_message, get_messages, get_recent_messages_for_llm,
+    update_conversation_title, delete_conversation, toggle_pin
+)
+from llm.client import stream_response
+from llm.prompt_builder import build_messages
+from rag.retriever import retrieve, format_context
+from rag.ingestion import ingest_bytes, ingest_directory
+from rag.vector_store import list_sources, get_doc_count
+from rai.policy_engine import is_safe, get_refusal_message
+from rai.evaluator import evaluate_response
+from news.fetcher import (
+    fetch_news, fetch_market_data, fetch_sector_performance,
+    fetch_fear_greed, fetch_sparkline_data
 )
 
+st.set_page_config(
+    page_title="Aria",
+    page_icon="A",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-def load_css():
-    st.markdown("""
-    <style>
-    /* ── Import fonts ── */
-    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap');
+CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=JetBrains+Mono:wght@400;500&display=swap');
 
-    /* ── Root variables ── */
-    :root {
-        --bg-primary: #0d0f12;
-        --bg-secondary: #13161b;
-        --bg-tertiary: #1a1e26;
-        --bg-card: #1e2330;
-        --border: #2a2f3d;
-        --border-light: #353b4d;
-        --accent: #4f8ef7;
-        --accent-dim: rgba(79,142,247,0.12);
-        --accent-glow: rgba(79,142,247,0.25);
-        --green: #34d399;
-        --red: #f87171;
-        --amber: #fbbf24;
-        --text-primary: #e8eaf0;
-        --text-secondary: #8b919e;
-        --text-dim: #545b6b;
-        --user-bubble: #1e2d4a;
-        --user-border: #2a4070;
-        --radius: 14px;
-        --radius-sm: 8px;
-    }
+:root {
+    --black:   #0a0a0a;
+    --bg:      #111111;
+    --surface: #161616;
+    --surface2:#1e1e1e;
+    --border:  #222222;
+    --border2: #2e2e2e;
+    --text:    #e8e8e8;
+    --muted:   #888888;
+    --dim:     #444444;
+    --accent:  #e50914;
+    --blue:    #3b82f6;
+    --green:   #22c55e;
+    --red:     #ef4444;
+    --amber:   #f59e0b;
+    --radius:  4px;
+}
 
-  
-    #MainMenu, footer, header {visibility: hidden;}
-    .stDeployButton {display:none;}
-    .block-container {padding: 0 !important; max-width: 100% !important;}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-   
-    html, body, [data-testid="stAppViewContainer"] {
-        background: var(--bg-primary) !important;
-        font-family: 'DM Sans', sans-serif;
-        color: var(--text-primary);
-    }
+html, body, [class*="css"] {
+    font-family: 'Inter', system-ui, sans-serif !important;
+    background: var(--black) !important;
+    color: var(--text) !important;
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+}
 
+.main .block-container { padding: 0 !important; max-width: 100% !important; }
+header[data-testid="stHeader"] { display: none !important; }
+.stDeployButton { display: none !important; }
+#MainMenu { display: none !important; }
+footer { display: none !important; }
+.stApp { background: var(--black) !important; }
 
-    [data-testid="stSidebar"] {
-        background: var(--bg-secondary) !important;
-        border-right: 1px solid var(--border) !important;
-        width: 280px !important;
-    }
-    [data-testid="stSidebar"] > div:first-child {
-        padding: 0 !important;
-    }
+section[data-testid="stSidebar"] {
+    background: var(--bg) !important;
+    border-right: 1px solid var(--border) !important;
+    width: 240px !important;
+}
+section[data-testid="stSidebar"] > div {
+    background: var(--bg) !important;
+    padding: 0 !important;
+}
 
-    .sidebar-logo {
-        padding: 20px 18px 16px;
-        border-bottom: 1px solid var(--border);
-        display: flex;
-        align-items: center;
-        gap: 10px;
-    }
-    .sidebar-logo-icon {
-        width: 32px; height: 32px;
-        background: linear-gradient(135deg, var(--accent), #7c6af7);
-        border-radius: 8px;
-        display: flex; align-items: center; justify-content: center;
-        font-size: 16px;
-    }
-    .sidebar-logo-text {
-        font-size: 15px; font-weight: 600;
-        color: var(--text-primary);
-        letter-spacing: -0.3px;
-    }
-    .sidebar-logo-badge {
-        font-size: 10px; color: var(--accent);
-        background: var(--accent-dim);
-        padding: 2px 7px; border-radius: 10px;
-        font-weight: 500; margin-left: auto;
-    }
+.s-wordmark { padding: 28px 20px 20px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+.s-wordmark-name { font-size: 17px; font-weight: 600; letter-spacing: -0.3px; color: var(--text); }
+.s-wordmark-sub { font-size: 10px; color: var(--dim); letter-spacing: 1.8px; text-transform: uppercase; margin-top: 3px; }
+.s-section-label { font-size: 9px; font-weight: 600; letter-spacing: 1.8px; text-transform: uppercase; color: var(--dim); padding: 16px 20px 6px; }
+.doc-pill { display: inline-flex; align-items: center; padding: 3px 8px; background: var(--surface2); border: 1px solid var(--border); border-radius: 2px; font-size: 10px; color: var(--muted); margin: 2px; font-family: 'JetBrains Mono', monospace; }
 
+.stButton > button {
+    background: transparent !important;
+    color: var(--muted) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius) !important;
+    font-family: 'Inter', sans-serif !important;
+    font-size: 12.5px !important;
+    font-weight: 400 !important;
+    padding: 8px 14px !important;
+    transition: all 0.12s !important;
+    width: 100% !important;
+    text-align: left !important;
+}
+.stButton > button:hover {
+    background: var(--surface) !important;
+    color: var(--text) !important;
+    border-color: var(--border2) !important;
+}
 
-    .new-chat-btn {
-        margin: 12px 14px;
-        background: var(--bg-tertiary);
-        border: 1px solid var(--border);
-        border-radius: var(--radius-sm);
-        padding: 9px 14px;
-        cursor: pointer;
-        display: flex; align-items: center; gap: 8px;
-        color: var(--text-secondary);
-        font-size: 13px; font-weight: 500;
-        transition: all 0.15s;
-        width: calc(100% - 28px);
-    }
-    .new-chat-btn:hover {
-        background: var(--bg-card);
-        color: var(--text-primary);
-        border-color: var(--border-light);
-    }
+.topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 36px; height: 56px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    position: sticky; top: 0; z-index: 100;
+}
+.topbar-left { display: flex; align-items: center; gap: 12px; }
+.topbar-title { font-size: 14px; font-weight: 600; color: var(--text); letter-spacing: -0.2px; }
+.topbar-mode {
+    font-size: 10px; font-weight: 600; letter-spacing: 1.2px; text-transform: uppercase;
+    padding: 3px 8px; border-radius: 2px; border: 1px solid;
+}
+.topbar-mode.general { color: var(--blue); border-color: rgba(59,130,246,0.3); background: rgba(59,130,246,0.06); }
+.topbar-mode.finance { color: var(--green); border-color: rgba(34,197,94,0.3); background: rgba(34,197,94,0.06); }
+.topbar-live {
+    font-size: 10px; font-weight: 600; letter-spacing: 1.2px; text-transform: uppercase;
+    color: var(--accent); border: 1px solid rgba(229,9,20,0.3); background: rgba(229,9,20,0.06);
+    padding: 3px 10px; border-radius: 2px; display: flex; align-items: center; gap: 6px;
+}
+.live-dot {
+    width: 5px; height: 5px; border-radius: 50%; background: var(--accent);
+    animation: livepulse 1.4s ease-in-out infinite;
+}
+@keyframes livepulse { 0%,100%{opacity:1} 50%{opacity:0.2} }
 
-   
-    .conv-section-label {
-        padding: 12px 18px 6px;
-        font-size: 10px; font-weight: 600;
-        text-transform: uppercase; letter-spacing: 1px;
-        color: var(--text-dim);
-    }
-    .conv-item {
-        margin: 2px 8px;
-        padding: 9px 12px;
-        border-radius: var(--radius-sm);
-        cursor: pointer;
-        display: flex; align-items: center; gap: 9px;
-        transition: background 0.12s;
-    }
-    .conv-item:hover { background: var(--bg-tertiary); }
-    .conv-item.active { background: var(--accent-dim); border: 1px solid var(--accent-glow); }
-    .conv-item-icon { font-size: 13px; opacity: 0.6; }
-    .conv-item-text {
-        flex: 1; min-width: 0;
-        font-size: 13px; color: var(--text-secondary);
-        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    }
-    .conv-item.active .conv-item-text { color: var(--text-primary); }
-    .conv-item-time {
-        font-size: 10px; color: var(--text-dim);
-        white-space: nowrap;
-    }
+.main-glow {
+    background: radial-gradient(ellipse at 50% 0%, rgba(229,9,20,0.07) 0%, transparent 65%);
+    min-height: 100vh;
+    padding-bottom: 120px;
+}
 
+.chat-wrap { max-width: 740px; margin: 0 auto; padding: 32px 0 40px; }
 
-    .chat-wrapper {
-        display: flex;
-        flex-direction: column;
-        height: 100vh;
-        background: var(--bg-primary);
-    }
+.msg-row { display: flex; gap: 12px; margin-bottom: 28px; }
+.msg-avatar {
+    width: 28px; height: 28px; border-radius: 2px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 600; flex-shrink: 0; margin-top: 1px;
+    letter-spacing: 0.3px;
+}
+.avatar-user { background: var(--surface2); color: var(--muted); border: 1px solid var(--border2); }
+.avatar-ai { background: var(--accent); color: white; }
+.msg-meta { font-size: 10px; font-weight: 600; color: var(--dim); margin-bottom: 6px; letter-spacing: 0.8px; text-transform: uppercase; }
+.msg-body { font-size: 14px; line-height: 1.8; color: var(--text); }
+.msg-user-bubble { background: var(--surface); border: 1px solid var(--border); padding: 11px 15px; border-radius: var(--radius); display: inline-block; }
 
-  
-    .top-bar {
-        padding: 14px 28px;
-        border-bottom: 1px solid var(--border);
-        display: flex; align-items: center; justify-content: space-between;
-        background: var(--bg-primary);
-        position: sticky; top: 0; z-index: 100;
-    }
-    .top-bar-title {
-        font-size: 14px; font-weight: 600;
-        color: var(--text-primary);
-    }
-    .top-bar-model {
-        font-size: 12px; color: var(--text-dim);
-        background: var(--bg-tertiary);
-        padding: 4px 10px; border-radius: 20px;
-        border: 1px solid var(--border);
-    }
+.sources-row { display: flex; align-items: center; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.sources-label { font-size: 9px; color: var(--dim); font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; }
+.source-chip { font-size: 10px; font-family: 'JetBrains Mono', monospace; color: var(--blue); background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.2); padding: 2px 7px; border-radius: 2px; }
 
-    
-    .messages-container {
-        flex: 1;
-        overflow-y: auto;
-        padding: 28px 0;
-    }
+.disclaimer { margin-top: 12px; padding: 9px 13px; background: rgba(245,158,11,0.05); border-left: 2px solid var(--amber); font-size: 11.5px; color: #92813a; line-height: 1.6; }
 
-    .message-row {
-        display: flex;
-        padding: 6px 28px;
-        max-width: 860px;
-        margin: 0 auto;
-        width: 100%;
-        gap: 14px;
-        align-items: flex-start;
-    }
+.typing-row { display: flex; gap: 4px; align-items: center; padding: 4px 0; }
+.typing-dot { width: 5px; height: 5px; background: var(--dim); border-radius: 50%; animation: blink 1.2s infinite; }
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes blink { 0%,60%,100%{opacity:0.2} 30%{opacity:1} }
 
-    .avatar {
-        width: 32px; height: 32px;
-        border-radius: 8px;
-        display: flex; align-items: center; justify-content: center;
-        font-size: 14px;
-        flex-shrink: 0; margin-top: 2px;
-    }
-    .avatar-ai {
-        background: linear-gradient(135deg, var(--accent), #7c6af7);
-    }
-    .avatar-user {
-        background: var(--user-bubble);
-        border: 1px solid var(--user-border);
-    }
+.input-footer {
+    position: fixed; bottom: 0; right: 0; left: 240px; z-index: 90;
+    background: linear-gradient(to top, var(--black) 75%, transparent);
+    padding: 20px 36px 28px;
+}
+.input-inner {
+    max-width: 740px; margin: 0 auto;
+    background: var(--surface); border: 1px solid var(--border2);
+    border-radius: var(--radius); display: flex; align-items: flex-end; gap: 8px; padding: 10px 12px;
+    transition: border-color 0.15s;
+}
+.input-inner:focus-within { border-color: #3a3a3a; }
 
-    .message-content {
-        flex: 1; min-width: 0;
-        padding-top: 4px;
-    }
-    .message-sender {
-        font-size: 12px; font-weight: 600;
-        margin-bottom: 6px;
-        color: var(--text-secondary);
-        letter-spacing: 0.3px;
-    }
-    .message-text {
-        font-size: 14.5px;
-        line-height: 1.75;
-        color: var(--text-primary);
-    }
-    .message-text p { margin: 0 0 10px; }
-    .message-text p:last-child { margin-bottom: 0; }
-    .message-text code {
-        font-family: 'DM Mono', monospace;
-        font-size: 13px;
-        background: var(--bg-tertiary);
-        padding: 2px 6px; border-radius: 4px;
-        color: #7dd3fc;
-    }
-    .message-text pre {
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        border-radius: var(--radius-sm);
-        padding: 14px 16px;
-        overflow-x: auto;
-        margin: 10px 0;
-    }
-    .message-text pre code {
-        background: none; padding: 0;
-        font-size: 13px; color: var(--text-primary);
-    }
-    .message-text ul, .message-text ol {
-        padding-left: 20px; margin: 8px 0;
-    }
-    .message-text li { margin-bottom: 4px; }
-    .message-text strong { color: #c7d2fe; font-weight: 600; }
-    .message-text h3 {
-        font-size: 15px; font-weight: 600;
-        color: var(--text-primary); margin: 14px 0 6px;
-    }
+.stTextArea textarea {
+    background: transparent !important; border: none !important;
+    color: var(--text) !important; font-family: 'Inter', sans-serif !important;
+    font-size: 13.5px !important; resize: none !important;
+    box-shadow: none !important; padding: 2px 0 !important; line-height: 1.6 !important;
+}
+.stTextArea textarea::placeholder { color: var(--dim) !important; }
+.stTextArea textarea:focus { box-shadow: none !important; border: none !important; outline: none !important; }
+.stTextArea [data-baseweb="textarea"] { background: transparent !important; border: none !important; }
 
- 
-    .sources-row {
-        display: flex; flex-wrap: wrap; gap: 6px;
-        margin-top: 10px;
-    }
-    .source-chip {
-        font-size: 11px;
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        color: var(--text-dim);
-        padding: 3px 9px; border-radius: 12px;
-        display: flex; align-items: center; gap: 5px;
-    }
-    .source-chip span { color: var(--accent); }
+.send-btn > button {
+    background: var(--text) !important; color: var(--black) !important;
+    border: none !important; border-radius: 2px !important;
+    font-size: 12px !important; font-weight: 600 !important; padding: 7px 16px !important; letter-spacing: 0.3px !important;
+}
+.send-btn > button:hover { background: #ccc !important; }
 
-   
-    .disclaimer-badge {
-        display: inline-flex; align-items: center; gap: 5px;
-        font-size: 11px; color: var(--amber);
-        background: rgba(251,191,36,0.08);
-        border: 1px solid rgba(251,191,36,0.2);
-        padding: 3px 9px; border-radius: 12px;
-        margin-top: 8px;
-    }
+.welcome-wrap {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; min-height: 55vh; text-align: center;
+    padding: 40px 20px 140px;
+}
+.aria-figure { margin: 0 auto 20px; display: block; }
+.aria-intro { font-size: 11px; font-weight: 600; letter-spacing: 2px; text-transform: uppercase; color: var(--dim); margin-bottom: 10px; }
+.welcome-title { font-size: 26px; font-weight: 600; letter-spacing: -0.6px; color: var(--text); margin-bottom: 16px; line-height: 1.3; }
+.aria-speech {
+    font-size: 13.5px; color: var(--muted); line-height: 1.75;
+    max-width: 480px; margin: 0 auto 28px; text-align: left;
+    background: var(--surface); border: 1px solid var(--border);
+    border-left: 2px solid var(--accent); padding: 16px 20px; border-radius: 0 var(--radius) var(--radius) 0;
+}
+.aria-speech strong { color: var(--text); font-weight: 600; }
+.aria-steps { display: flex; gap: 8px; margin-bottom: 32px; max-width: 480px; width: 100%; }
+.aria-step { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; text-align: left; }
+.aria-step-num { font-size: 9px; font-weight: 600; letter-spacing: 1.5px; color: var(--accent); margin-bottom: 5px; text-transform: uppercase; }
+.aria-step-text { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.aria-step-text strong { color: var(--text); }
+.prompts-label { font-size: 9px; font-weight: 600; letter-spacing: 1.8px; text-transform: uppercase; color: var(--dim); margin-bottom: 12px; }
+.welcome-card-btn > button {
+    background: var(--surface) !important; border: 1px solid var(--border) !important;
+    color: var(--muted) !important; border-radius: var(--radius) !important;
+    padding: 13px 15px !important; font-size: 12.5px !important;
+    text-align: left !important; height: auto !important; line-height: 1.5 !important; white-space: normal !important;
+}
+.welcome-card-btn > button:hover { border-color: var(--border2) !important; color: var(--text) !important; background: var(--surface2) !important; }
 
-    
-    .typing-indicator {
-        display: flex; gap: 4px; align-items: center;
-        padding: 4px 0;
-    }
-    .typing-dot {
-        width: 6px; height: 6px;
-        background: var(--text-dim);
-        border-radius: 50%;
-        animation: pulse 1.2s ease-in-out infinite;
-    }
-    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
-    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
-    @keyframes pulse {
-        0%, 100% { opacity: 0.3; transform: translateY(0); }
-        50% { opacity: 1; transform: translateY(-3px); }
-    }
+.ticker-bar { display: flex; gap: 0; background: var(--bg); border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
+.ticker-bar::-webkit-scrollbar { display: none; }
+.ticker-cell { padding: 12px 24px; border-right: 1px solid var(--border); flex-shrink: 0; min-width: 110px; }
+.ticker-sym { font-size: 9px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--dim); margin-bottom: 3px; }
+.ticker-val { font-size: 13px; font-weight: 600; color: var(--text); font-family: 'JetBrains Mono', monospace; letter-spacing: -0.3px; }
+.ticker-chg { font-size: 11px; font-family: 'JetBrains Mono', monospace; margin-top: 1px; }
+.pos { color: var(--green); }
+.neg { color: var(--red); }
 
-  
-    .welcome-screen {
-        max-width: 620px; margin: 60px auto;
-        text-align: center; padding: 0 28px;
-    }
-    .welcome-icon {
-        width: 56px; height: 56px;
-        background: linear-gradient(135deg, var(--accent), #7c6af7);
-        border-radius: 14px;
-        display: flex; align-items: center; justify-content: center;
-        font-size: 26px;
-        margin: 0 auto 20px;
-    }
-    .welcome-title {
-        font-size: 26px; font-weight: 600;
-        color: var(--text-primary); margin-bottom: 10px;
-        letter-spacing: -0.5px;
-    }
-    .welcome-sub {
-        font-size: 15px; color: var(--text-secondary);
-        line-height: 1.6; margin-bottom: 32px;
-    }
-    .suggestion-grid {
-        display: grid; grid-template-columns: 1fr 1fr;
-        gap: 10px; text-align: left;
-    }
-    .suggestion-card {
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        padding: 14px 16px;
-        cursor: pointer;
-        transition: all 0.15s;
-    }
-    .suggestion-card:hover {
-        border-color: var(--accent);
-        background: var(--accent-dim);
-    }
-    .suggestion-label {
-        font-size: 12px; color: var(--accent);
-        font-weight: 600; margin-bottom: 4px;
-    }
-    .suggestion-text {
-        font-size: 13px; color: var(--text-secondary);
-        line-height: 1.4;
-    }
+.news-page { padding: 0 36px 60px; }
+.page-section { margin: 28px 0 14px; font-size: 10px; font-weight: 600; letter-spacing: 1.8px; text-transform: uppercase; color: var(--dim); border-bottom: 1px solid var(--border); padding-bottom: 10px; }
 
-   
-    .input-area {
-        padding: 16px 28px 20px;
-        background: var(--bg-primary);
-        border-top: 1px solid var(--border);
-        max-width: 860px; margin: 0 auto; width: 100%;
-    }
-    .input-container {
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        padding: 12px 14px;
-        display: flex; align-items: flex-end; gap: 10px;
-        transition: border-color 0.15s;
-    }
-    .input-container:focus-within {
-        border-color: var(--accent);
-        box-shadow: 0 0 0 3px var(--accent-dim);
-    }
+.kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); }
+.kpi-cell { background: var(--bg); padding: 22px; }
+.kpi-label { font-size: 9px; font-weight: 600; letter-spacing: 1.8px; text-transform: uppercase; color: var(--dim); margin-bottom: 10px; }
+.kpi-value { font-size: 28px; font-weight: 600; color: var(--text); font-family: 'JetBrains Mono', monospace; letter-spacing: -1.5px; line-height: 1; }
+.kpi-change { font-size: 11.5px; font-family: 'JetBrains Mono', monospace; margin-top: 6px; }
 
+.secondary-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-top: none; }
+.secondary-cell { background: var(--bg); padding: 14px 22px; display: flex; justify-content: space-between; align-items: center; }
+.secondary-name { font-size: 12px; font-weight: 400; color: var(--muted); }
+.secondary-val { font-size: 12px; font-family: 'JetBrains Mono', monospace; color: var(--text); }
 
-    .stTextArea textarea {
-        background: transparent !important;
-        border: none !important;
-        color: var(--text-primary) !important;
-        font-family: 'DM Sans', sans-serif !important;
-        font-size: 14.5px !important;
-        resize: none !important;
-        padding: 0 !important;
-        box-shadow: none !important;
-    }
-    .stTextArea textarea::placeholder { color: var(--text-dim) !important; }
-    .stTextArea [data-baseweb="base-input"] {
-        background: transparent !important;
-        border: none !important;
-    }
+.fg-bar-wrap { position: relative; height: 4px; background: linear-gradient(to right, #ef4444, #f59e0b, #22c55e); margin: 10px 0 6px; }
+.fg-marker { position: absolute; top: -4px; width: 12px; height: 12px; background: var(--text); border-radius: 50%; transform: translateX(-50%); border: 2px solid var(--bg); }
+.fg-labels { display: flex; justify-content: space-between; font-size: 9px; color: var(--dim); letter-spacing: 0.5px; }
 
-    
-    .stButton > button {
-        background: var(--accent) !important;
-        color: white !important;
-        border: none !important;
-        border-radius: var(--radius-sm) !important;
-        font-family: 'DM Sans', sans-serif !important;
-        font-weight: 500 !important;
-        font-size: 13px !important;
-        padding: 8px 16px !important;
-        transition: all 0.15s !important;
-    }
-    .stButton > button:hover {
-        background: #3d7de8 !important;
-        transform: translateY(-1px) !important;
-    }
+.news-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); }
+.news-card { background: var(--bg); padding: 22px; transition: background 0.12s; }
+.news-card:hover { background: var(--surface); }
+.news-cat { font-size: 9px; font-weight: 600; letter-spacing: 1.8px; text-transform: uppercase; color: var(--accent); margin-bottom: 10px; }
+.news-headline { font-size: 14px; font-weight: 600; color: var(--text); line-height: 1.45; margin-bottom: 10px; letter-spacing: -0.2px; }
+.news-summary { font-size: 12.5px; color: var(--muted); line-height: 1.65; margin-bottom: 16px; }
+.news-meta { display: flex; justify-content: space-between; align-items: center; }
+.news-source-name { font-size: 10.5px; font-weight: 600; color: var(--muted); }
+.news-date { font-size: 10.5px; color: var(--dim); }
+.news-read { font-size: 11px; font-weight: 600; color: var(--blue); text-decoration: none; letter-spacing: 0.3px; }
+.news-read:hover { color: #60a5fa; }
 
-    [data-testid="stFileUploader"] {
-        background: var(--bg-tertiary) !important;
-        border: 1px dashed var(--border) !important;
-        border-radius: var(--radius-sm) !important;
-    }
+.sector-row { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.sector-name { font-size: 12px; color: var(--muted); width: 130px; flex-shrink: 0; }
+.sector-bar-wrap { flex: 1; height: 3px; background: var(--surface2); position: relative; }
+.sector-bar-fill { height: 100%; position: absolute; top: 0; left: 0; }
+.sector-pct { font-size: 11px; font-family: 'JetBrains Mono', monospace; width: 54px; text-align: right; flex-shrink: 0; }
 
-    
-    .stat-row {
-        display: flex; gap: 8px; flex-wrap: wrap;
-        margin: 12px 14px;
-    }
-    .stat-pill {
-        font-size: 11px;
-        background: var(--bg-tertiary);
-        border: 1px solid var(--border);
-        color: var(--text-dim);
-        padding: 4px 10px; border-radius: 20px;
-        display: flex; align-items: center; gap: 5px;
-    }
-    .stat-pill b { color: var(--text-secondary); }
+.stSelectbox > div > div { background: var(--surface) !important; border: 1px solid var(--border) !important; color: var(--text) !important; border-radius: var(--radius) !important; font-size: 12.5px !important; }
+.stFileUploader { background: transparent !important; border: 1px dashed var(--border) !important; border-radius: var(--radius) !important; }
+[data-testid="stMarkdownContainer"] p { font-size: 14px; line-height: 1.75; }
+</style>
+"""
 
-   
-    ::-webkit-scrollbar { width: 5px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb {
-        background: var(--border);
-        border-radius: 10px;
-    }
+ARIA_SVG_GENERAL = """
+<svg width="100" height="130" viewBox="0 0 100 130" fill="none" xmlns="http://www.w3.org/2000/svg" class="aria-figure">
+  <circle cx="50" cy="30" r="22" fill="#f5c5a3"/>
+  <ellipse cx="50" cy="20" rx="16" ry="10" fill="#1a0f05"/>
+  <path d="M34 22 Q50 10 66 22" fill="#1a0f05"/>
+  <ellipse cx="50" cy="13" rx="14" ry="6" fill="#1a0f05"/>
+  <circle cx="43" cy="32" r="2.5" fill="#3d2b1f"/>
+  <circle cx="57" cy="32" r="2.5" fill="#3d2b1f"/>
+  <circle cx="44" cy="31" r="0.8" fill="white" opacity="0.7"/>
+  <circle cx="58" cy="31" r="0.8" fill="white" opacity="0.7"/>
+  <path d="M44 40 Q50 44 56 40" stroke="#c9956a" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+  <path d="M50 52 L50 52" stroke="#f5c5a3" stroke-width="4"/>
+  <path d="M28 56 Q28 48 50 48 Q72 48 72 56 L76 98 Q76 104 50 104 Q24 104 24 98 Z" fill="#1a1a2e"/>
+  <path d="M46 48 L42 64 L50 60 L58 64 L54 48" fill="#e8e8e8" opacity="0.92"/>
+  <rect x="46" y="60" width="8" height="3" rx="1" fill="#e50914" opacity="0.9"/>
+  <rect x="46" y="66" width="8" height="2" rx="1" fill="#e50914" opacity="0.5"/>
+  <path d="M28 62 Q16 68 18 84 Q20 96 30 92" fill="#f5c5a3"/>
+  <path d="M72 62 Q84 68 82 84 Q80 96 70 92" fill="#f5c5a3"/>
+  <path d="M32 118 Q32 104 50 104 Q68 104 68 118" fill="#1a1a2e" opacity="0.7"/>
+  <ellipse cx="38" cy="120" rx="7" ry="5" fill="#1a1a2e" opacity="0.6"/>
+  <ellipse cx="62" cy="120" rx="7" ry="5" fill="#1a1a2e" opacity="0.6"/>
+</svg>
+"""
 
-  
-    .refusal-msg {
-        background: rgba(248,113,113,0.08);
-        border: 1px solid rgba(248,113,113,0.2);
-        border-radius: var(--radius-sm);
-        padding: 10px 14px;
-        color: #fca5a5;
-        font-size: 13.5px;
-    }
-
-    /* ── Streamlit column gaps ── */
-    [data-testid="column"] { padding: 0 !important; }
-    </style>
-    """, unsafe_allow_html=True)
-
+ARIA_SVG_FINANCE = """
+<svg width="100" height="130" viewBox="0 0 100 130" fill="none" xmlns="http://www.w3.org/2000/svg" class="aria-figure">
+  <circle cx="50" cy="30" r="22" fill="#f5c5a3"/>
+  <ellipse cx="50" cy="20" rx="16" ry="10" fill="#0d0a06"/>
+  <path d="M34 22 Q50 10 66 22" fill="#0d0a06"/>
+  <ellipse cx="50" cy="13" rx="14" ry="6" fill="#0d0a06"/>
+  <circle cx="43" cy="32" r="2.5" fill="#2a1e14"/>
+  <circle cx="57" cy="32" r="2.5" fill="#2a1e14"/>
+  <circle cx="44" cy="31" r="0.8" fill="white" opacity="0.7"/>
+  <circle cx="58" cy="31" r="0.8" fill="white" opacity="0.7"/>
+  <path d="M44 40 Q50 44 56 40" stroke="#c9956a" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+  <path d="M28 56 Q28 48 50 48 Q72 48 72 56 L76 98 Q76 104 50 104 Q24 104 24 98 Z" fill="#0f1a0f"/>
+  <path d="M46 48 L42 64 L50 60 L58 64 L54 48" fill="#e8e8e8" opacity="0.92"/>
+  <rect x="46" y="60" width="8" height="3" rx="1" fill="#22c55e" opacity="0.9"/>
+  <rect x="46" y="66" width="8" height="2" rx="1" fill="#22c55e" opacity="0.5"/>
+  <path d="M28 62 Q16 68 18 84 Q20 96 30 92" fill="#f5c5a3"/>
+  <path d="M72 62 Q84 68 82 84 Q80 96 70 92" fill="#f5c5a3"/>
+  <path d="M32 118 Q32 104 50 104 Q68 104 68 118" fill="#0f1a0f" opacity="0.7"/>
+  <ellipse cx="38" cy="120" rx="7" ry="5" fill="#0f1a0f" opacity="0.6"/>
+  <ellipse cx="62" cy="120" rx="7" ry="5" fill="#0f1a0f" opacity="0.6"/>
+</svg>
+"""
 
 
 def init_session():
-    if "chat_memory" not in st.session_state:
-        st.session_state.chat_memory = ChatMemory(settings.MEMORY_DB_PATH)
-    if "current_conv_id" not in st.session_state:
-        st.session_state.current_conv_id = None
-    if "conversations" not in st.session_state:
-        st.session_state.conversations = []
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    if "retriever" not in st.session_state:
-        st.session_state.retriever = None
-    if "llm_client" not in st.session_state:
-        st.session_state.llm_client = LLMClient()
-    if "prompt_builder" not in st.session_state:
-        st.session_state.prompt_builder = PromptBuilder()
-    if "intent_classifier" not in st.session_state:
-        st.session_state.intent_classifier = IntentClassifier()
-    if "policy_engine" not in st.session_state:
-        st.session_state.policy_engine = PolicyEngine()
-    if "evaluator" not in st.session_state:
-        st.session_state.evaluator = ResponseEvaluator()
-    if "docs_uploaded" not in st.session_state:
-        st.session_state.docs_uploaded = []
-    if "suggestion_clicked" not in st.session_state:
-        st.session_state.suggestion_clicked = None
+    defaults = {
+        "current_view": "general",
+        "active_conv_id": None,
+        "pending_suggestion": None,
+        "docs_ingested": False,
+        "uploaded_names": [],
+        "rename_conv_id": None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
 
-    st.session_state.conversations = (
-        st.session_state.chat_memory.list_conversations()
-    )
-
-
-    _load_vector_store()
-
-
-def _load_vector_store():
-    try:
-        vs = VectorStore(settings.VECTOR_STORE_PATH)
-        if vs.exists():
-            embedder = Embedder(settings.EMBED_MODEL)
-            st.session_state.retriever = Retriever(vs, embedder)
-    except Exception:
-        pass
-
+def ingest_startup_docs():
+    if not st.session_state.docs_ingested:
+        try:
+            from config.settings import DOCS_PATH
+            if os.path.exists(DOCS_PATH) and os.listdir(DOCS_PATH):
+                ingest_directory(DOCS_PATH)
+        except Exception:
+            pass
+        st.session_state.docs_ingested = True
 
 
 def render_sidebar():
     with st.sidebar:
-        # Logo
-        st.markdown("""
-        <div class="sidebar-logo">
-            <div class="sidebar-logo-icon">📈</div>
-            <div class="sidebar-logo-text">FinanceAI</div>
-            <div class="sidebar-logo-badge">BETA</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        if st.button("＋  New Conversation", key="new_chat", use_container_width=True):
-            new_id = st.session_state.chat_memory.new_conversation()
-            st.session_state.current_conv_id = new_id
-            st.session_state.messages = []
-            st.session_state.conversations = (
-                st.session_state.chat_memory.list_conversations()
-            )
-            st.rerun()
-
-      
-        convs = st.session_state.conversations
-        if convs:
-            st.markdown('<div class="conv-section-label">Recent Chats</div>',
-                        unsafe_allow_html=True)
-            for conv in convs[:20]:
-                is_active = conv["id"] == st.session_state.current_conv_id
-                active_cls = "active" if is_active else ""
-                ts = conv.get("updated_at", "")[:10] if conv.get("updated_at") else ""
-                label = conv.get("title", "New conversation")[:32]
-                btn_key = f"conv_{conv['id']}"
-                if st.button(
-                    f"{'💬' if is_active else '○'}  {label}",
-                    key=btn_key,
-                    use_container_width=True
-                ):
-                    st.session_state.current_conv_id = conv["id"]
-                    st.session_state.messages = (
-                        st.session_state.chat_memory.load_messages(conv["id"])
-                    )
-                    st.rerun()
-
-        st.divider()
-
-    
-        st.markdown("**📂 Knowledge Base**")
-        uploaded = st.file_uploader(
-            "Upload PDF or TXT",
-            type=["pdf", "txt"],
-            accept_multiple_files=True,
-            key="doc_upload",
-            label_visibility="collapsed"
-        )
-        if uploaded:
-            if st.button("Ingest Documents", use_container_width=True):
-                with st.spinner("Processing…"):
-                    paths = _save_uploads(uploaded)
-                    _ingest(paths)
-
-       
-        if st.session_state.docs_uploaded:
-            st.markdown(
-                '<div class="conv-section-label">Indexed Documents</div>',
-                unsafe_allow_html=True
-            )
-            for doc in st.session_state.docs_uploaded[-8:]:
-                st.markdown(
-                    f'<div class="stat-pill">📄 <b>{doc[:24]}</b></div>',
-                    unsafe_allow_html=True
-                )
-
-        st.divider()
-
-       
-        model_name = settings.LLM_MODEL or "Not configured"
-        backend = settings.LLM_BACKEND
         st.markdown(
-            f'<div class="stat-pill">🤖 <b>{backend}</b> · {model_name[:20]}</div>',
-            unsafe_allow_html=True
-        )
-        rag_status = "✅ Active" if st.session_state.retriever else "⚪ No docs"
-        st.markdown(
-            f'<div class="stat-pill" style="margin-top:6px">📚 RAG: <b>{rag_status}</b></div>',
+            '<div class="s-wordmark">'
+            '<div class="s-wordmark-name">Aria</div>'
+            '<div class="s-wordmark-sub">Intelligence Platform</div>'
+            '</div>',
             unsafe_allow_html=True
         )
 
-
-def _save_uploads(files) -> list:
-    upload_dir = Path(settings.UPLOAD_DIR)
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    paths = []
-    for f in files:
-        dest = upload_dir / f.name
-        dest.write_bytes(f.read())
-        paths.append(str(dest))
-        if f.name not in st.session_state.docs_uploaded:
-            st.session_state.docs_uploaded.append(f.name)
-    return paths
-
-
-def _ingest(paths: list):
-    try:
-        embedder = Embedder(settings.EMBED_MODEL)
-        vs = VectorStore(settings.VECTOR_STORE_PATH)
-        ingest_documents(paths, embedder, vs,
-                         chunk_size=settings.CHUNK_SIZE,
-                         chunk_overlap=settings.CHUNK_OVERLAP)
-        st.session_state.retriever = Retriever(vs, embedder)
-        st.success(f"✅ {len(paths)} document(s) indexed!")
-    except Exception as e:
-        st.error(f"Ingestion error: {e}")
-
-
-
-def render_message(role: str, content: str, sources=None, is_typing=False):
-    if role == "user":
-        avatar = "🧑"
-        avatar_cls = "avatar-user"
-        sender = "You"
-    else:
-        avatar = "📈"
-        avatar_cls = "avatar-ai"
-        sender = "FinanceAI"
-
-    if is_typing:
-        body = """
-        <div class="typing-indicator">
-            <div class="typing-dot"></div>
-            <div class="typing-dot"></div>
-            <div class="typing-dot"></div>
-        </div>"""
-    else:
-        import re
-       
-        safe = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-       
-        safe = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', safe)
-        
-        safe = re.sub(r'`([^`]+)`', r'<code>\1</code>', safe)
-        
-        safe = re.sub(r'^### (.+)$', r'<h3>\1</h3>', safe, flags=re.MULTILINE)
-       
-        safe = re.sub(r'^\* (.+)$', r'<li>\1</li>', safe, flags=re.MULTILINE)
-        safe = re.sub(r'^- (.+)$', r'<li>\1</li>', safe, flags=re.MULTILINE)
-        safe = re.sub(r'(<li>.*</li>)', r'<ul>\1</ul>', safe, flags=re.DOTALL)
-       
-        parts = safe.split('\n\n')
-        parts = [f"<p>{p.replace(chr(10), '<br>')}</p>" if not p.strip().startswith('<') else p
-                 for p in parts if p.strip()]
-        body = ''.join(parts)
-
-    sources_html = ""
-    if sources:
-        chips = "".join(
-            f'<div class="source-chip"><span>📄</span> {s}</div>'
-            for s in sources
-        )
-        sources_html = f'<div class="sources-row">{chips}</div>'
-
-    disclaimer_html = ""
-    if role == "assistant" and content:
-        disclaimer_html = """
-        <div class="disclaimer-badge">
-            ⚠️ Not financial advice. For informational purposes only.
-        </div>"""
-
-    st.markdown(f"""
-    <div class="message-row">
-        <div class="avatar {avatar_cls}">{avatar}</div>
-        <div class="message-content">
-            <div class="message-sender">{sender}</div>
-            <div class="message-text">{body}</div>
-            {sources_html}
-            {disclaimer_html}
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-
-def render_welcome():
-    suggestions = [
-        ("📊 Investing", "What's the difference between stocks, bonds, and ETFs?"),
-        ("💰 Budgeting", "How do I create a personal budget using the 50/30/20 rule?"),
-        ("📈 Risk", "Explain risk tolerance and how it affects my portfolio"),
-        ("🏦 Concepts", "What is compound interest and why does it matter?"),
-    ]
-
-    st.markdown("""
-    <div class="welcome-screen">
-        <div class="welcome-icon">📈</div>
-        <div class="welcome-title">Your Finance AI Assistant</div>
-        <div class="welcome-sub">
-            Ask me anything about investing, financial literacy, budgeting, or risk management.
-            Upload your documents for personalized insights.
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    cols = st.columns(2)
-    for i, (label, text) in enumerate(suggestions):
-        with cols[i % 2]:
-            if st.button(f"{label}\n{text}", key=f"suggest_{i}", use_container_width=True):
-                st.session_state.suggestion_clicked = text
+        st.markdown('<div class="s-section-label">Navigate</div>', unsafe_allow_html=True)
+        for view_id, label in [("general", "General Chat"), ("finance", "Finance Mode"), ("news", "Market News")]:
+            if st.button(label, key="nav_" + view_id, use_container_width=True):
+                st.session_state.current_view = view_id
+                st.session_state.rename_conv_id = None
                 st.rerun()
 
+        if st.session_state.current_view in ("general", "finance"):
+            mode = st.session_state.current_view
 
+            st.markdown('<div class="s-section-label">Conversations</div>', unsafe_allow_html=True)
+            if st.button("+ New Chat", key="new_chat", use_container_width=True):
+                cid = create_conversation("New Chat", mode)
+                st.session_state.active_conv_id = cid
+                st.session_state.rename_conv_id = None
+                st.rerun()
 
-def process_query(query: str):
-    """Run the full RAG + LLM + RAI pipeline."""
+            all_convs = get_conversations()
+            convs = [c for c in all_convs if c.get("mode", "general") == mode]
 
+            for conv in convs[:18]:
+                cid = conv["id"]
+                is_active = cid == st.session_state.active_conv_id
+                is_pinned = bool(conv.get("pinned", 0))
+                raw_title = conv.get("title", "Untitled")
+                is_renaming = st.session_state.rename_conv_id == cid
 
-    if not st.session_state.current_conv_id:
-        cid = st.session_state.chat_memory.new_conversation(title=query[:40])
-        st.session_state.current_conv_id = cid
-        st.session_state.conversations = (
-            st.session_state.chat_memory.list_conversations()
-        )
-    else:
+                if is_renaming:
+                    new_name = st.text_input(
+                        "Rename", value=raw_title,
+                        key="rename_input_" + cid,
+                        label_visibility="collapsed"
+                    )
+                    c1, c2 = st.columns([1, 1])
+                    with c1:
+                        if st.button("Save", key="rename_save_" + cid, use_container_width=True):
+                            if new_name.strip():
+                                update_conversation_title(cid, new_name.strip())
+                            st.session_state.rename_conv_id = None
+                            st.rerun()
+                    with c2:
+                        if st.button("Cancel", key="rename_cancel_" + cid, use_container_width=True):
+                            st.session_state.rename_conv_id = None
+                            st.rerun()
+                else:
+                    display = (raw_title[:22] + "…") if len(raw_title) > 22 else raw_title
+                    pin_mark = "· " if is_pinned else "  "
+                    prefix = "— " if is_active else "  "
+                    c1, c2, c3, c4 = st.columns([5, 1, 1, 1])
+                    with c1:
+                        if st.button(prefix + pin_mark + display, key="conv_" + cid, use_container_width=True):
+                            st.session_state.active_conv_id = cid
+                            st.session_state.rename_conv_id = None
+                            st.rerun()
+                    with c2:
+                        pin_lbl = "u" if is_pinned else "p"
+                        if st.button(pin_lbl, key="pin_" + cid, help="Unpin" if is_pinned else "Pin"):
+                            toggle_pin(cid)
+                            st.rerun()
+                    with c3:
+                        if st.button("r", key="ren_" + cid, help="Rename"):
+                            st.session_state.rename_conv_id = cid
+                            st.rerun()
+                    with c4:
+                        if st.button("x", key="del_" + cid, help="Delete"):
+                            delete_conversation(cid)
+                            if st.session_state.active_conv_id == cid:
+                                st.session_state.active_conv_id = None
+                            st.rerun()
 
-        if len(st.session_state.messages) == 0:
-            st.session_state.chat_memory.update_title(
-                st.session_state.current_conv_id, query[:40]
-            )
-
-    
-    intent = st.session_state.intent_classifier.classify(query)
-    allowed, refusal_msg = st.session_state.policy_engine.check(query, intent)
-
-    if not allowed:
-        return refusal_msg, [], True  # content, sources, is_refusal
-
-
-    sources = []
-    context_chunks = []
-    if st.session_state.retriever:
-        results = st.session_state.retriever.retrieve(
-            query, top_k=settings.TOP_K
-        )
-        for r in results:
-            context_chunks.append(r["text"])
-            src = r.get("source", "")
-            if src and src not in sources:
-                sources.append(src)
-
-  
-    history = st.session_state.messages[-settings.MAX_HISTORY * 2:]
-    prompt = st.session_state.prompt_builder.build(
-        query=query,
-        history=history,
-        context_chunks=context_chunks,
-        intent=intent
-    )
-
- 
-    return prompt, sources, False
-
-
-def stream_response(prompt: str, placeholder):
-    """Stream tokens into a Streamlit placeholder."""
-    full_text = ""
-    try:
-        for chunk in st.session_state.llm_client.stream(prompt):
-            full_text += chunk
-            # Render partial with cursor
-            placeholder.markdown(
-                full_text + "▌",
-                unsafe_allow_html=False
-            )
-        placeholder.empty()
-    except Exception as e:
-        full_text = f"⚠️ Error generating response: {str(e)}\n\nPlease check your LLM configuration in `.env`."
-        placeholder.empty()
-    return full_text
-
-
-
-def main():
-    load_css()
-    init_session()
-
-    
-    render_sidebar()
-
-  
-    prefill = ""
-    if st.session_state.suggestion_clicked:
-        prefill = st.session_state.suggestion_clicked
-        st.session_state.suggestion_clicked = None
-
-  
-    msgs = st.session_state.messages
-
-  
-    if not msgs and not st.session_state.current_conv_id:
-        render_welcome()
-    else:
-        st.markdown('<div style="height:20px"></div>', unsafe_allow_html=True)
-        for msg in msgs:
-            render_message(
-                msg["role"],
-                msg["content"],
-                sources=msg.get("sources", [])
-            )
-
-    st.markdown('<div style="height:80px"></div>', unsafe_allow_html=True)
-
-    
-    with st.container():
-        st.markdown(
-            '<div style="position:fixed;bottom:0;left:280px;right:0;z-index:200;'
-            'background:var(--bg-primary,#0d0f12);border-top:1px solid #2a2f3d;'
-            'padding:14px 28px 18px;">',
-            unsafe_allow_html=True
-        )
-        col1, col2 = st.columns([10, 1])
-        with col1:
-            user_input = st.text_area(
-                "Message",
-                value=prefill,
-                placeholder="Ask about investing, markets, financial planning…",
-                key="user_input",
-                height=52,
+            st.markdown('<div class="s-section-label">Documents</div>', unsafe_allow_html=True)
+            uploaded = st.file_uploader(
+                "Upload", type=["pdf", "txt", "md"],
+                accept_multiple_files=True, key="file_upload",
                 label_visibility="collapsed"
             )
-        with col2:
-            send = st.button("Send ↑", key="send_btn")
-        st.markdown("</div>", unsafe_allow_html=True)
+            if uploaded:
+                for uf in uploaded:
+                    if uf.name not in st.session_state.uploaded_names:
+                        with st.spinner("Indexing " + uf.name + "…"):
+                            n = ingest_bytes(uf.read(), uf.name)
+                        st.session_state.uploaded_names.append(uf.name)
+                        st.success(uf.name + " — " + str(n) + " chunks")
 
-  
-    if send and user_input.strip():
-        query = user_input.strip()
+            sources = list_sources()
+            if sources:
+                count_line = str(get_doc_count()) + " chunks · " + str(len(sources)) + " file(s)"
+                st.markdown(
+                    '<div style="font-size:10px;color:var(--dim);padding:4px 0 6px;">' + count_line + '</div>',
+                    unsafe_allow_html=True
+                )
+                for s in sources[:6]:
+                    st.markdown('<span class="doc-pill">' + s[:24] + '</span>', unsafe_allow_html=True)
 
-        
-        st.session_state.messages.append({
-            "role": "user",
-            "content": query,
-            "sources": []
-        })
-        render_message("user", query)
 
-        
-        typing_ph = st.empty()
-        typing_ph.markdown("""
-        <div class="message-row">
-            <div class="avatar avatar-ai">📈</div>
-            <div class="message-content">
-                <div class="message-sender">FinanceAI</div>
-                <div class="typing-indicator">
-                    <div class="typing-dot"></div>
-                    <div class="typing-dot"></div>
-                    <div class="typing-dot"></div>
-                </div>
-            </div>
-        </div>""", unsafe_allow_html=True)
+def build_aria_welcome(mode):
+    svg = ARIA_SVG_FINANCE if mode == "finance" else ARIA_SVG_GENERAL
 
-        
-        prompt, sources, is_refusal = process_query(query)
-        typing_ph.empty()
+    if mode == "finance":
+        title = "Finance Intelligence"
+        speech = (
+            "I'm <strong>Aria</strong>, your finance intelligence assistant. "
+            "I walk you through investing fundamentals, explain market mechanics, "
+            "break down financial statements, and help you understand risk. "
+            "I reference your uploaded documents when relevant, and I always "
+            "flag when something is educational context rather than personal advice."
+        )
+        steps = [
+            ("01", "Upload a document", "Drop a PDF or report in the sidebar to ground my answers."),
+            ("02", "Ask anything", "Markets, valuation, macro, crypto — broad or specific."),
+            ("03", "Follow up", "I remember the conversation. Push back, go deeper, iterate."),
+        ]
+    else:
+        title = "How can I help?"
+        speech = (
+            "I'm <strong>Aria</strong>, your general-purpose AI assistant. "
+            "I help you write, code, research, analyse, and think through problems. "
+            "Upload documents and I'll work from them directly. "
+            "I'm direct, I don't pad answers, and I'll tell you when I don't know something."
+        )
+        steps = [
+            ("01", "Start a chat", "Hit '+ New Chat' in the sidebar or pick a prompt below."),
+            ("02", "Upload context", "Add PDFs or text files — I'll reference them in answers."),
+            ("03", "Iterate", "Multi-turn memory is on. Build on previous answers freely."),
+        ]
 
-        if is_refusal:
-            response_text = prompt  # refusal message
+    steps_parts = []
+    for num, heading, detail in steps:
+        steps_parts.append(
+            '<div class="aria-step">'
+            '<div class="aria-step-num">' + num + '</div>'
+            '<div class="aria-step-text"><strong>' + heading + '</strong><br>' + detail + '</div>'
+            '</div>'
+        )
+    steps_html = "".join(steps_parts)
+
+    html = (
+        '<div class="welcome-wrap">'
+        '<div class="aria-intro">Your assistant</div>'
+        + svg +
+        '<div class="welcome-title">' + title + '</div>'
+        '<div class="aria-speech">' + speech + '</div>'
+        '<div class="aria-steps">' + steps_html + '</div>'
+        '<div class="prompts-label">Or start with a prompt</div>'
+        '</div>'
+    )
+    return html
+
+
+def handle_chat(mode):
+    system_prompt = FINANCE_SYSTEM_PROMPT if mode == "finance" else GENERAL_SYSTEM_PROMPT
+
+    if not st.session_state.active_conv_id:
+        if mode == "finance":
+            suggestions = [
+                "Explain the P/E ratio and how investors use it",
+                "What is dollar-cost averaging?",
+                "How do central bank interest rates affect equity markets?",
+                "Explain risk-adjusted return and the Sharpe ratio",
+            ]
         else:
-           
-            stream_ph = st.empty()
-            response_text = stream_response(prompt, stream_ph)
+            suggestions = [
+                "Explain how transformers work in machine learning",
+                "Help me write a professional executive summary",
+                "Write a Python script to parse a CSV file",
+                "Compare REST vs GraphQL APIs",
+            ]
 
-        
-        render_message("assistant", response_text, sources=sources)
+        st.markdown(build_aria_welcome(mode), unsafe_allow_html=True)
 
-       
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": response_text,
-            "sources": sources
-        })
-        if st.session_state.current_conv_id:
-            st.session_state.chat_memory.save_message(
-                st.session_state.current_conv_id, "user", query
-            )
-            st.session_state.chat_memory.save_message(
-                st.session_state.current_conv_id, "assistant", response_text,
-                metadata={"sources": sources}
-            )
+        cols = st.columns(2)
+        for i, text in enumerate(suggestions):
+            with cols[i % 2]:
+                st.markdown('<div class="welcome-card-btn">', unsafe_allow_html=True)
+                if st.button(text, key="sug_" + str(i), use_container_width=True):
+                    cid = create_conversation(text[:45], mode)
+                    st.session_state.active_conv_id = cid
+                    st.session_state.pending_suggestion = text
+                    st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
+        return
 
+    cid = st.session_state.active_conv_id
+    conv = get_conversation(cid)
+    if not conv:
+        st.session_state.active_conv_id = None
+        st.rerun()
+        return
+
+    messages = get_messages(cid)
+
+    st.markdown('<div class="chat-wrap">', unsafe_allow_html=True)
+    if not messages and not st.session_state.get("pending_suggestion"):
+        st.markdown(
+            '<div style="padding:48px 0;text-align:center;color:var(--dim);font-size:13px;">Send a message to begin.</div>',
+            unsafe_allow_html=True
+        )
+    else:
+        render_messages(messages, mode)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    pending = st.session_state.get("pending_suggestion")
+    if pending:
+        st.session_state.pending_suggestion = None
+        process_query(pending, cid, mode, system_prompt)
+        st.rerun()
+
+    st.markdown('<div class="input-footer"><div class="input-inner">', unsafe_allow_html=True)
+    col1, col2 = st.columns([11, 1])
+    with col1:
+        placeholder = "Ask about markets, investing, finance…" if mode == "finance" else "Ask anything…"
+        user_input = st.text_area(
+            "Message", placeholder=placeholder, key="chat_input",
+            height=52, label_visibility="collapsed"
+        )
+    with col2:
+        st.markdown('<div class="send-btn">', unsafe_allow_html=True)
+        send = st.button("Send", key="send_btn")
+        st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div></div>', unsafe_allow_html=True)
+
+    if send and user_input.strip():
+        process_query(user_input.strip(), cid, mode, system_prompt)
         st.rerun()
 
 
+def render_messages(messages, mode):
+    for msg in messages:
+        role = msg["role"]
+        content = msg.get("content", "")
+        if role == "user":
+            html = (
+                '<div class="msg-row">'
+                '<div class="msg-avatar avatar-user">YOU</div>'
+                '<div>'
+                '<div class="msg-meta">You</div>'
+                '<div class="msg-body msg-user-bubble">' + content + '</div>'
+                '</div>'
+                '</div>'
+            )
+            st.markdown(html, unsafe_allow_html=True)
+        else:
+            sources = msg.get("sources", [])
+            has_disclaimer = "Disclaimer" in content or "not financial advice" in content.lower()
+            clean = content.split("---")[0].strip() if "---\n" in content else content
+
+            sources_html = ""
+            if sources:
+                chips = "".join('<span class="source-chip">' + s + '</span>' for s in sources)
+                sources_html = '<div class="sources-row"><span class="sources-label">Sources</span>' + chips + '</div>'
+
+            disclaimer_html = ""
+            if mode == "finance" and not has_disclaimer:
+                disclaimer_html = (
+                    '<div class="disclaimer">For educational purposes only. '
+                    'This is not financial advice. Consult a qualified financial advisor '
+                    'before making investment decisions.</div>'
+                )
+
+            html = (
+                '<div class="msg-row">'
+                '<div class="msg-avatar avatar-ai">AI</div>'
+                '<div style="flex:1;min-width:0">'
+                '<div class="msg-meta">Aria</div>'
+                '<div class="msg-body">' + clean + '</div>'
+                + sources_html + disclaimer_html +
+                '</div>'
+                '</div>'
+            )
+            st.markdown(html, unsafe_allow_html=True)
+
+
+def process_query(query, cid, mode, system_prompt):
+    safe, reason = is_safe(query)
+    if not safe:
+        add_message(cid, "user", query)
+        add_message(cid, "assistant", get_refusal_message(reason))
+        conv = get_conversation(cid)
+        if conv and conv.get("title") == "New Chat":
+            update_conversation_title(cid, query[:45])
+        return
+
+    add_message(cid, "user", query)
+
+    context, sources = None, []
+    if get_doc_count() > 0:
+        results = retrieve(query)
+        if results:
+            context, sources = format_context(results)
+
+    history = get_recent_messages_for_llm(cid, max_messages=18)
+    history = history[:-1] if history and history[-1]["role"] == "user" else history
+    llm_messages = build_messages(history, query, context=context)
+
+    ph = st.empty()
+    ph.markdown(
+        '<div class="msg-row">'
+        '<div class="msg-avatar avatar-ai">AI</div>'
+        '<div><div class="msg-meta">Aria</div>'
+        '<div class="typing-row">'
+        '<div class="typing-dot"></div>'
+        '<div class="typing-dot"></div>'
+        '<div class="typing-dot"></div>'
+        '</div></div></div>',
+        unsafe_allow_html=True
+    )
+
+    full = ""
+    try:
+        for chunk in stream_response(llm_messages, system_prompt):
+            full += chunk
+            ph.markdown(
+                '<div class="msg-row">'
+                '<div class="msg-avatar avatar-ai">AI</div>'
+                '<div style="flex:1;min-width:0">'
+                '<div class="msg-meta">Aria</div>'
+                '<div class="msg-body">' + full + '▌</div>'
+                '</div></div>',
+                unsafe_allow_html=True
+            )
+    except Exception as e:
+        full = "An error occurred: " + str(e)
+
+    ph.empty()
+
+    evaluation = evaluate_response(query, full, sources)
+    if not evaluation["passed"] and "contains_error" in evaluation.get("issues", []):
+        full += "\n\n*Response quality check flagged an issue.*"
+
+    add_message(cid, "assistant", full, sources=sources)
+    conv = get_conversation(cid)
+    if conv and conv.get("title") == "New Chat":
+        update_conversation_title(cid, query[:45])
+
+
+def render_news():
+    market_data = fetch_market_data()
+    indices = market_data.get("indices", [])
+    crypto = market_data.get("crypto", [])
+    forex = market_data.get("forex", [])
+    commodities = market_data.get("commodities", [])
+
+    ticker_parts = ['<div class="ticker-bar">']
+    for item in indices + crypto[:2]:
+        chg = item["change"]
+        sign = "+" if chg >= 0 else ""
+        cls = "pos" if chg >= 0 else "neg"
+        ticker_parts.append(
+            '<div class="ticker-cell">'
+            '<div class="ticker-sym">' + item["symbol"] + '</div>'
+            '<div class="ticker-val">' + "{:,.2f}".format(item["value"]) + '</div>'
+            '<div class="ticker-chg ' + cls + '">' + sign + "{:.2f}".format(chg) + '%</div>'
+            '</div>'
+        )
+    ticker_parts.append('</div>')
+    st.markdown("".join(ticker_parts), unsafe_allow_html=True)
+
+    st.markdown('<div class="news-page">', unsafe_allow_html=True)
+    st.markdown('<div class="page-section">Market Overview</div>', unsafe_allow_html=True)
+
+    fg = fetch_fear_greed()
+    fg_label = next((l for t, l in [(20,"Extreme Fear"),(40,"Fear"),(60,"Neutral"),(80,"Greed"),(100,"Extreme Greed")] if fg <= t), "Greed")
+    fg_cls = "pos" if fg >= 50 else "neg"
+
+    kpi_items = [
+        ("S&P 500", "{:,.2f}".format(indices[0]["value"]), indices[0]["change"], True),
+        ("Nasdaq", "{:,.2f}".format(indices[1]["value"]), indices[1]["change"], True),
+        ("Bitcoin", "${:,.0f}".format(crypto[0]["value"]), crypto[0]["change"], True),
+        ("Fear & Greed", str(fg), None, False),
+    ]
+    kpi_parts = ['<div class="kpi-row">']
+    for label, val, chg, is_num in kpi_items:
+        if is_num and chg is not None:
+            sign = "+" if chg >= 0 else ""
+            cls = "pos" if chg >= 0 else "neg"
+            chg_html = '<div class="kpi-change ' + cls + '">' + sign + "{:.2f}".format(chg) + '%</div>'
+        else:
+            chg_html = '<div class="kpi-change ' + fg_cls + '">' + fg_label + '</div>'
+        kpi_parts.append(
+            '<div class="kpi-cell">'
+            '<div class="kpi-label">' + label + '</div>'
+            '<div class="kpi-value">' + val + '</div>'
+            + chg_html +
+            '</div>'
+        )
+    kpi_parts.append('</div>')
+    st.markdown("".join(kpi_parts), unsafe_allow_html=True)
+
+    sec_parts = ['<div class="secondary-row">']
+    for item in commodities:
+        chg = item["change"]
+        sign = "+" if chg >= 0 else ""
+        cls = "pos" if chg >= 0 else "neg"
+        sec_parts.append(
+            '<div class="secondary-cell">'
+            '<span class="secondary-name">' + item["name"] + '</span>'
+            '<span class="secondary-val ' + cls + '">' + sign + "{:.2f}".format(chg) + '%</span>'
+            '</div>'
+        )
+    sec_parts.append('</div>')
+    st.markdown("".join(sec_parts), unsafe_allow_html=True)
+
+    col_left, col_right = st.columns([3, 2])
+
+    with col_left:
+        st.markdown('<div class="page-section">Sector Performance</div>', unsafe_allow_html=True)
+        sectors = fetch_sector_performance()
+        try:
+            import plotly.graph_objects as go
+            colors = ["#22c55e" if s["change"] >= 0 else "#ef4444" for s in sectors]
+            fig = go.Figure(go.Bar(
+                x=[s["change"] for s in sectors],
+                y=[s["sector"] for s in sectors],
+                orientation="h",
+                marker_color=colors,
+                marker_line_width=0,
+                text=[("+" if s["change"] >= 0 else "") + "{:.2f}".format(s["change"]) + "%" for s in sectors],
+                textposition="outside",
+                textfont=dict(family="JetBrains Mono", size=10, color="#888"),
+            ))
+            fig.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="Inter", color="#666", size=11),
+                height=300, margin=dict(l=0, r=50, t=0, b=0),
+                xaxis=dict(gridcolor="#1f1f1f", zeroline=True, zerolinecolor="#2a2a2a",
+                           tickfont=dict(family="JetBrains Mono", size=10)),
+                yaxis=dict(gridcolor="rgba(0,0,0,0)", tickfont=dict(size=11, color="#888")),
+                showlegend=False, bargap=0.35,
+            )
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        except ImportError:
+            for s in sectors:
+                chg = s["change"]
+                pct = min(abs(chg) / 2.0 * 100, 100)
+                fill_color = "#22c55e" if chg >= 0 else "#ef4444"
+                sign = "+" if chg >= 0 else ""
+                cls = "pos" if chg >= 0 else "neg"
+                st.markdown(
+                    '<div class="sector-row">'
+                    '<div class="sector-name">' + s["sector"] + '</div>'
+                    '<div class="sector-bar-wrap">'
+                    '<div class="sector-bar-fill" style="width:' + str(pct) + '%;background:' + fill_color + ';opacity:0.7"></div>'
+                    '</div>'
+                    '<div class="sector-pct ' + cls + '">' + sign + "{:.2f}".format(chg) + '%</div>'
+                    '</div>',
+                    unsafe_allow_html=True
+                )
+
+    with col_right:
+        st.markdown('<div class="page-section">Fear & Greed Index</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div style="background:var(--bg);border:1px solid var(--border);padding:22px;">'
+            '<div style="font-size:42px;font-weight:600;font-family:\'JetBrains Mono\',monospace;letter-spacing:-2px;color:var(--text);line-height:1">' + str(fg) + '</div>'
+            '<div style="font-size:12px;font-weight:600;margin:6px 0 16px;letter-spacing:0.5px;" class="' + fg_cls + '">' + fg_label.upper() + '</div>'
+            '<div class="fg-bar-wrap"><div class="fg-marker" style="left:' + str(fg) + '%"></div></div>'
+            '<div class="fg-labels"><span>Extreme Fear</span><span>Extreme Greed</span></div>'
+            '</div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown('<div class="page-section" style="margin-top:24px">Forex</div>', unsafe_allow_html=True)
+        for item in forex:
+            chg = item["change"]
+            sign = "+" if chg >= 0 else ""
+            cls = "pos" if chg >= 0 else "neg"
+            st.markdown(
+                '<div class="secondary-cell" style="border:1px solid var(--border);border-top:none;background:var(--bg);padding:12px 16px">'
+                '<span class="secondary-name">' + item["name"] + '</span>'
+                '<div style="text-align:right">'
+                '<div style="font-family:\'JetBrains Mono\',monospace;font-size:12px;color:var(--text)">' + str(item["value"]) + '</div>'
+                '<div class="' + cls + '" style="font-size:10.5px;font-family:\'JetBrains Mono\',monospace">' + sign + "{:.2f}".format(chg) + '%</div>'
+                '</div>'
+                '</div>',
+                unsafe_allow_html=True
+            )
+
+    try:
+        import plotly.graph_objects as go
+        sparkline = fetch_sparkline_data()
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(
+            y=sparkline, mode="lines", fill="tozeroy",
+            line=dict(color="#3b82f6", width=1.5),
+            fillcolor="rgba(59,130,246,0.05)",
+        ))
+        fig2.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", height=70,
+            margin=dict(l=0, r=0, t=0, b=0),
+            xaxis=dict(showgrid=False, showticklabels=False, zeroline=False),
+            yaxis=dict(showgrid=False, showticklabels=False, zeroline=False),
+            showlegend=False,
+        )
+        st.markdown(
+            '<div style="margin-top:24px;font-size:9px;font-weight:600;letter-spacing:1.8px;text-transform:uppercase;color:var(--dim);padding-bottom:8px">S&P 500 — 30-Day</div>',
+            unsafe_allow_html=True
+        )
+        st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False})
+    except ImportError:
+        pass
+
+    st.markdown('<div class="page-section" style="margin-top:8px">Latest News</div>', unsafe_allow_html=True)
+    articles = fetch_news(page_size=12)
+
+    news_parts = ['<div class="news-grid">']
+    for article in articles:
+        title = (article.get("title") or "").replace("<", "&lt;")
+        desc = article.get("description") or ""
+        desc = (desc[:130] + "…") if len(desc) > 130 else desc
+        desc = desc.replace("<", "&lt;")
+        url = article.get("url", "#")
+        source = article.get("source", {})
+        source_name = source.get("name", "Unknown") if isinstance(source, dict) else str(source)
+        cat = article.get("category", "markets").upper().replace("_", " ")
+        pub = article.get("publishedAt", "")[:10]
+        news_parts.append(
+            '<div class="news-card">'
+            '<div class="news-cat">' + cat + '</div>'
+            '<div class="news-headline">' + title + '</div>'
+            '<div class="news-summary">' + desc + '</div>'
+            '<div class="news-meta">'
+            '<div><span class="news-source-name">' + source_name + '</span>'
+            ' <span class="news-date">' + pub + '</span></div>'
+            '<a href="' + url + '" target="_blank" class="news-read">Read</a>'
+            '</div>'
+            '</div>'
+        )
+    news_parts.append('</div>')
+    st.markdown("".join(news_parts), unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+def main():
+    init_session()
+    ingest_startup_docs()
+
+    st.markdown(CSS, unsafe_allow_html=True)
+
+    render_sidebar()
+
+    view = st.session_state.current_view
+
+    st.markdown('<div class="main-glow">', unsafe_allow_html=True)
+
+    if view == "news":
+        st.markdown(
+            '<div class="topbar">'
+            '<div class="topbar-left"><div class="topbar-title">Market News & Analytics</div></div>'
+            '<div class="topbar-live"><div class="live-dot"></div>Live</div>'
+            '</div>',
+            unsafe_allow_html=True
+        )
+        render_news()
+
+    elif view == "finance":
+        st.markdown(
+            '<div class="topbar">'
+            '<div class="topbar-left">'
+            '<div class="topbar-title">Finance Mode</div>'
+            '<div class="topbar-mode finance">Finance</div>'
+            '</div></div>',
+            unsafe_allow_html=True
+        )
+        handle_chat("finance")
+
+    else:
+        st.markdown(
+            '<div class="topbar">'
+            '<div class="topbar-left">'
+            '<div class="topbar-title">General Chat</div>'
+            '<div class="topbar-mode general">General</div>'
+            '</div></div>',
+            unsafe_allow_html=True
+        )
+        handle_chat("general")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
 if __name__ == "__main__":
-   main()
+    main()

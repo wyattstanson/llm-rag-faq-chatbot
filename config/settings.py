@@ -1,67 +1,53 @@
-
 import os
-from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
 
-class Settings:
-    
-    LLM_BACKEND: str = os.getenv("LLM_BACKEND", "ollama")
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "llama3.2")
-    LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "http://localhost:11434")
-    LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")
-    LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
-    LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "1024"))
-    LLM_STREAM: bool = os.getenv("LLM_STREAM", "true").lower() == "true"
+LLM_BACKEND = os.getenv("LLM_BACKEND", "groq")
 
-    
-    EMBED_MODEL: str = os.getenv(
-        "EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
-    )
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 
- 
-    CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "400"))
-    CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "80"))
-    TOP_K: int = int(os.getenv("TOP_K", "4"))
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
 
-    
-    BASE_DIR: Path = Path(__file__).parent.parent
-    DATA_DIR: Path = BASE_DIR / "data" / "docs"
-    VECTOR_STORE_PATH: str = str(BASE_DIR / "data" / "vector_store")
-    MEMORY_DB_PATH: str = str(BASE_DIR / "data" / "chat_memory.db")
-    UPLOAD_DIR: str = str(BASE_DIR / "data" / "uploads")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama3-8b-8192")
 
-    MAX_HISTORY: int = int(os.getenv("MAX_HISTORY", "10"))
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "400"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "80"))
+TOP_K = int(os.getenv("TOP_K", "4"))
 
-  
-    SYSTEM_PROMPT: str = os.getenv("SYSTEM_PROMPT", """You are FinanceAI, a knowledgeable and professional financial assistant. \
-You provide clear, accurate, and educational information about:
-- Personal finance and budgeting
-- Investing concepts (stocks, bonds, ETFs, mutual funds, crypto)
-- Risk management and portfolio theory
-- Financial literacy and economic concepts
-- Market analysis and financial planning frameworks
+VECTOR_INDEX_PATH = os.getenv("VECTOR_INDEX_PATH", "data/vector_index")
+FAISS_INDEX_FILE = os.path.join(VECTOR_INDEX_PATH, "index.faiss")
+META_FILE = os.path.join(VECTOR_INDEX_PATH, "meta.pkl")
 
-Your tone is professional yet approachable — like a knowledgeable friend with a finance background. \
-You explain concepts clearly, use real-world examples, and break down complex ideas step-by-step.
+SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", "data/chat_memory.db")
+DOCS_PATH = os.getenv("DOCS_PATH", "data/docs")
+UPLOADS_PATH = os.getenv("UPLOADS_PATH", "data/uploads")
 
-IMPORTANT RULES:
-1. Always clarify you are NOT providing personalised financial advice
-2. Encourage consulting a qualified financial advisor for personal decisions
-3. Be balanced when discussing investments — always mention risks alongside rewards
-4. Never recommend specific stocks, funds, or timing the market
-5. Cite retrieved context when available; be transparent about your sources
-6. If you don't know something, say so honestly""")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
+ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY", "")
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
 
+MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "20"))
+STREAMING = os.getenv("STREAMING", "true").lower() == "true"
 
-    ENABLE_RAI: bool = os.getenv("ENABLE_RAI", "true").lower() == "true"
-    BLOCKED_INTENTS: list = ["illegal", "manipulation", "harmful", "pii_request"]
+FINANCE_SYSTEM_PROMPT = """You are Aria, an intelligent AI assistant with deep expertise in finance, investing, and economics. You help users understand financial concepts clearly and accessibly.
 
+When discussing finance topics:
+- Explain concepts in plain language with real examples
+- Cover investing basics, portfolio theory, risk management, market analysis
+- Discuss macroeconomics, monetary policy, and market trends
+- Help with financial literacy and planning concepts
+- Always add context about risks involved
 
-settings = Settings()
+ALWAYS include this disclaimer when giving specific financial guidance:
+⚠️ Disclaimer: This is for educational purposes only and not financial advice. Consult a qualified financial advisor before making investment decisions.
 
+Be concise, accurate, and genuinely helpful."""
 
-os.makedirs(settings.DATA_DIR, exist_ok=True)
-os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
-os.makedirs(os.path.dirname(settings.MEMORY_DB_PATH), exist_ok=True)
+GENERAL_SYSTEM_PROMPT = """You are Aria, a brilliant, versatile AI assistant. You are knowledgeable, thoughtful, and direct. You help with anything — coding, writing, analysis, research, creative work, and more.
+
+Be concise and clear. Get to the point. Use examples when helpful. Think step by step for complex problems."""

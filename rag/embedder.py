@@ -1,31 +1,21 @@
+from sentence_transformers import SentenceTransformer
+from config.settings import EMBEDDING_MODEL
+
+_model = None
 
 
-from typing import List
-import numpy as np
+def get_model():
+    global _model
+    if _model is None:
+        _model = SentenceTransformer(EMBEDDING_MODEL)
+    return _model
 
 
-class Embedder:
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
-        self.model_name = model_name
-        self._model = None
+def embed_texts(texts: list) -> list:
+    model = get_model()
+    return model.encode(texts, show_progress_bar=False).tolist()
 
-    @property
-    def model(self):
-        if self._model is None:
-            from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer(self.model_name)
-        return self._model
 
-    def embed(self, text: str) -> np.ndarray:
-        """Embed a single string."""
-        return self.model.encode(text, convert_to_numpy=True, normalize_embeddings=True)
-
-    def embed_batch(self, texts: List[str]) -> np.ndarray:
-        """Embed a list of strings — returns (N, dim) array."""
-        return self.model.encode(
-            texts,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-            batch_size=32,
-            show_progress_bar=len(texts) > 100,
-        )
+def embed_query(query: str) -> list:
+    model = get_model()
+    return model.encode([query], show_progress_bar=False)[0].tolist()

@@ -1,45 +1,42 @@
+import re
 
-from config.settings import settings
+BLOCKED_PATTERNS = [
+    r"\b(hack|exploit|crack|bypass security|ddos|malware|phishing)\b",
+    r"\b(how to make.*bomb|weapon|poison|drug synthesis)\b",
+    r"\b(suicide|self.harm|kill myself)\b",
+    r"\b(child.*(abuse|exploit|porn))\b",
+]
 
-
-REFUSAL_MESSAGES = {
-    "illegal": (
-        "I'm not able to help with that. The query appears to involve potentially "
-        "illegal financial activities such as insider trading, fraud, or market "
-        "manipulation. These are serious offences with severe legal consequences."
-    ),
-    "manipulation": (
-        "I can't assist with market manipulation tactics. Such activities are "
-        "illegal, harmful to other investors, and undermine market integrity."
-    ),
-    "harmful": (
-        "I'm unable to help with that request as it may involve harmful or "
-        "illegal activities. Please rephrase if you have a legitimate finance question."
-    ),
-    "pii_request": (
-        "I don't handle sensitive personal or financial identifiers such as "
-        "Social Security numbers, credit card numbers, or bank account details. "
-        "Never share such information in a chat interface."
-    ),
-}
-
-DEFAULT_REFUSAL = (
-    "I'm not able to assist with that request. "
-    "Please ask me about investing, financial literacy, budgeting, or market concepts."
-)
+INJECTION_KEYWORDS = [
+    "ignore previous", "jailbreak", "pretend you are", "act as dan",
+    "developer mode", "override instructions", "bypass safety",
+]
 
 
-class PolicyEngine:
-    def check(self, query: str, intent: str) -> tuple:
-        """
-        Returns (allowed: bool, message: str)
-        If allowed=False, message contains refusal text.
-        """
-        if not settings.ENABLE_RAI:
-            return True, ""
+def is_safe(query: str) -> tuple:
+    q_lower = query.lower()
 
-        if intent in settings.BLOCKED_INTENTS:
-            msg = REFUSAL_MESSAGES.get(intent, DEFAULT_REFUSAL)
-            return False, msg
+    for pattern in BLOCKED_PATTERNS:
+        if re.search(pattern, q_lower):
+            return False, "harmful_content"
 
-        return True, ""
+    for kw in INJECTION_KEYWORDS:
+        if kw in q_lower:
+            return False, "prompt_injection"
+
+    return True, ""
+
+
+def get_refusal_message(reason: str) -> str:
+    messages = {
+        "harmful_content": "I am not able to help with that request as it may involve harmful content.",
+        "prompt_injection": "I detected an attempt to override my instructions. I will continue operating normally.",
+    }
+    return messages.get(reason, "I cannot assist with that request.")
+
+
+def add_finance_disclaimer(response: str) -> str:
+    disclaimer = "\n\n---\n⚠️ *Educational content only — not financial advice. Consult a qualified financial advisor before making investment decisions.*"
+    if "⚠️" not in response and "Disclaimer" not in response:
+        return response + disclaimer
+    return response
